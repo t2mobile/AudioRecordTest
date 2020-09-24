@@ -27,11 +27,16 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.util.ArrayList;
+import java.util.LinkedList;
 
 public class MainActivity extends AppCompatActivity {
     private static final String TAG = MainActivity.class.getSimpleName();
     private static String PATH = "/sdcard/audio.wav";
-    private static int BUFFER_SIZE = 882;
+    private static int SAMPLE_RATE = 44100;
+    private static int BUFFER_SIZE = 882; // 20 ms
+    private static int BUFFER_DURATION_MS = BUFFER_SIZE * 1000 / SAMPLE_RATE;
+    private static int PLAY_DELAY_MS = 1000; // 1 sec
+    private static int PLAY_DELAY_BUFFERS = PLAY_DELAY_MS / BUFFER_DURATION_MS;
 
     private static final int FUNC_RECORD = 0;
     private static final int FUNC_ARRAY_RECORD = 1;
@@ -58,6 +63,8 @@ public class MainActivity extends AppCompatActivity {
     private Thread mArray0RecordThread = null;
     private Thread mPlaybackThread = null;
     private Handler mHandler = new Handler(Looper.getMainLooper());
+
+    private final LinkedList<ByteBuffer> mAudioQueue = new LinkedList<>();
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -202,32 +209,78 @@ public class MainActivity extends AppCompatActivity {
         // start recording
         AudioRecord audioRecord = new AudioRecord(
                 MediaRecorder.AudioSource.MIC,
-                44100,
+                SAMPLE_RATE,
                 AudioFormat.CHANNEL_IN_MONO,
                 AudioFormat.ENCODING_PCM_16BIT,
                 BUFFER_SIZE);
-        ByteBuffer buffer = ByteBuffer.allocateDirect(BUFFER_SIZE);
         audioRecord.startRecording();
-
-        // remove previous file
-        File outputFile = new File(PATH);
-        if (outputFile.exists()) {
-            outputFile.delete();
-        }
 
         // read
         while (mRecordThread != null) {
-            buffer.position(0);
+            ByteBuffer buffer = ByteBuffer.allocateDirect(BUFFER_SIZE);
             int nRead = audioRecord.read(buffer, BUFFER_SIZE);
-            try (FileOutputStream fos = new FileOutputStream(outputFile, true)) {
-                try (FileChannel channel = fos.getChannel()) {
-                    Log.d(TAG, "onRecord()# nRead: " + nRead);
-                    buffer.position(0);
-                    channel.write(buffer, nRead);
-                }
-            } catch (IOException e) {
+            buffer.limit(nRead);
 
+            synchronized (mAudioQueue) {
+                mAudioQueue.addLast(buffer); // enqueue
+                //Log.d(TAG, "onRecord()# add a buffer. size: " + buffer.remaining() + ", queue: " + mAudioQueue.size());
+                mAudioQueue.notifyAll();
+
+                if (mPlaybackThread == null && mAudioQueue.size() >= PLAY_DELAY_BUFFERS) {
+                    // start playback
+                    mPlaybackThread = new Thread(()->{
+                        // init audio track
+                        AudioTrack audioTrack = new AudioTrack(
+                                AudioManager.STREAM_MUSIC,
+                                SAMPLE_RATE,
+                                AudioFormat.CHANNEL_OUT_MONO,
+                                AudioFormat.ENCODING_PCM_16BIT,
+                                BUFFER_SIZE,
+                                AudioTrack.MODE_STREAM
+                        );
+                        audioTrack.play();
+
+                        ByteBuffer audioData;
+                        do {
+                            synchronized (mAudioQueue) {
+                                // wait for audio data
+                                while (mAudioQueue.isEmpty()) {
+                                    try {
+                                        mAudioQueue.wait();
+                                    } catch (InterruptedException e) {
+                                        Log.w(TAG, "wait for mAudioQueue interrupted.", e);
+                                    }
+                                }
+
+                                // process data
+                                audioData = mAudioQueue.pollFirst(); // dequeue
+                            }
+
+                            if (audioData != null) {
+                                audioData.position(0);
+                                //Log.d(TAG, "onRecord()# play a buffer. size: " + audioData.remaining() + ", queue: " + mAudioQueue.size());
+                                audioTrack.write(audioData, audioData.remaining(), AudioTrack.WRITE_BLOCKING);
+                                audioTrack.flush();
+                            }
+
+                        } while (audioData != null);
+
+                        // stop
+                        audioTrack.stop();
+                        audioTrack.release();
+
+                        // update UI
+                        mHandler.post(this::uiReset);
+
+                        mPlaybackThread = null;
+                    });
+                    mPlaybackThread.start();
+                }
             }
+        }
+
+        synchronized (mAudioQueue) {
+            mAudioQueue.addLast(null);
         }
 
         // stop
@@ -268,7 +321,7 @@ public class MainActivity extends AppCompatActivity {
         // start recording
         AudioRecord audioRecord = new AudioRecord(
                 MediaRecorder.AudioSource.MIC,
-                44100,
+                SAMPLE_RATE,
                 AudioFormat.CHANNEL_IN_MONO,
                 AudioFormat.ENCODING_PCM_16BIT,
                 BUFFER_SIZE);
@@ -331,7 +384,7 @@ public class MainActivity extends AppCompatActivity {
         // start recording
         AudioRecord audioRecord = new AudioRecord(
                 MediaRecorder.AudioSource.MIC,
-                44100,
+                SAMPLE_RATE,
                 AudioFormat.CHANNEL_IN_MONO,
                 AudioFormat.ENCODING_PCM_16BIT,
                 BUFFER_SIZE);
@@ -394,7 +447,7 @@ public class MainActivity extends AppCompatActivity {
         Log.d(TAG, "onPlayback()# begin");
         AudioTrack audioTrack = new AudioTrack(
                 AudioManager.STREAM_MUSIC,
-                44100,
+                SAMPLE_RATE,
                 AudioFormat.CHANNEL_OUT_MONO,
                 AudioFormat.ENCODING_PCM_16BIT,
                 BUFFER_SIZE,
