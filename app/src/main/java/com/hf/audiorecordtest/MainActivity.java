@@ -281,6 +281,7 @@ public class MainActivity extends AppCompatActivity {
 
         synchronized (mAudioQueue) {
             mAudioQueue.addLast(null);
+            mAudioQueue.notifyAll();
         }
 
         // stop
